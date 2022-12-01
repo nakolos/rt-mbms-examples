@@ -1,0 +1,8 @@
+[submodule "flute-ffmpeg/lib/rt-libflute"]
+	path = flute-ffmpeg/lib/rt-libflute
+	url = ../rt-libflute
+	branch = development
+[submodule "flute-ffmpeg-tx/lib/rt-libflute"]
+	path = flute-ffmpeg-tx/lib/rt-libflute
+	url = ../rt-libflute
+	branch = development
