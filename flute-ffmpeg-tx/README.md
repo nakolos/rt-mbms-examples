@@ -64,7 +64,7 @@ The API subsection is needed when using NAKOLOS-controlled broadcast on demand. 
 
 ### 1. Start mbms-gw and eNode 
 
-By following the instructions in the qrd-tx repo (https://github.com/nakolos/srsRAN/tree/qrd-tx)
+By following the instructions in the qrd-tx repo (https://github.com/nakolos/srsRAN/tree/qrd-tx). Leave out the ffmpeg command in step 4.
 
 ### 2. Start flute-ffmpeg-tx
 ````
