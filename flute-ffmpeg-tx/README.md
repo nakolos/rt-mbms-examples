@@ -8,7 +8,7 @@ It reads video segments from configurable watch folders and sends them to the MB
 
 ### Install dependencies
 
-Dependecies are the same as for FLUTE-FFMPEG. Please follow the instructions [in its README](https://github.com/5G-MAG/rt-mbms-examples/tree/development/flute-ffmpeg).
+Dependencies are the same as for FLUTE-FFMPEG. Please follow the instructions [in its README](https://github.com/5G-MAG/rt-mbms-examples/tree/development/flute-ffmpeg).
 
 ### Build setup
 
