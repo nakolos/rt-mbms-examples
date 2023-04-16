@@ -17,10 +17,15 @@
 #include "FluteFfmpegTx.h"
 #include "spdlog/spdlog.h"
 #include "Poco/Delegate.h"
+#include "Poco/Path.h"
 #include <fstream>
 #include <libconfig.h++>
 
 using libconfig::Setting;
+
+  const std::string DASH_CONTENT_TYPE = "application/dash+xml";
+  const std::string HLS_CONTENT_TYPE = "application/x-mpegURL";
+  const std::string MPEGTS_CONTENT_TYPE = "video/mp2t";
 
 
 FluteFfmpegTx::FluteFfmpegTx(const libconfig::Config &cfg, boost::asio::io_service& io_service)
@@ -28,8 +33,6 @@ FluteFfmpegTx::FluteFfmpegTx(const libconfig::Config &cfg, boost::asio::io_servi
     , _io_service(io_service)
     , _api_poll_timer(io_service)
 {
-  _cfg.lookupValue("multicast_ip", _transmitter_multicast_ip);
-  _cfg.lookupValue("multicast_port", _transmitter_multicast_port);
   _cfg.lookupValue("mtu", _mtu);
   _cfg.lookupValue("rate_limit", _rate_limit);
   _cfg.lookupValue("watchfolder_path", _watchfolder_path);
@@ -37,12 +40,26 @@ FluteFfmpegTx::FluteFfmpegTx(const libconfig::Config &cfg, boost::asio::io_servi
   const Setting& root = _cfg.getRoot();
   const Setting& streams = root["streams"];
   for (const auto& stream_cfg : streams) {
-    auto& stream = _streams.emplace_back();
-    stream.id = (std::string)stream_cfg.lookup("id");
-    stream.directory = _watchfolder_path + (std::string)stream_cfg.lookup("subfolder");
-    stream.watcher = std::make_unique<Poco::DirectoryWatcher>(stream.directory);
-    stream.watcher->itemMovedTo += Poco::delegate(this, &FluteFfmpegTx::on_file_renamed);
-    spdlog::info("Registered stream {} at {}", stream.id, stream.directory);
+    auto stream = std::make_shared<Stream>();//_streams.emplace_back();
+    stream->id = (std::string)stream_cfg.lookup("id");
+    stream->tsi = 0;
+    stream->rate_limit = (uint32_t)_cfg.lookup("rate_limit");
+    stream->directory = _watchfolder_path + (std::string)stream_cfg.lookup("subfolder");
+    stream->watcher = std::make_unique<Poco::DirectoryWatcher>(stream->directory);
+    stream->watcher->itemMovedTo += Poco::delegate(stream.get(), &FluteFfmpegTx::Stream::on_file_renamed);
+    stream->transmitter = std::make_unique<LibFlute::Transmitter>(
+        (std::string)stream_cfg.lookup("multicast_ip"),
+        (int)stream_cfg.lookup("multicast_port"),
+        stream->tsi,
+        _mtu, stream->rate_limit, _io_service);
+    stream->transmitter->register_completion_callback(
+        [stream](uint32_t toi) {
+        spdlog::info("File with TOI {} has been sent. Freeing buffer.", toi);
+        free(stream->file_buffers[toi]);
+        stream->file_buffers.erase(toi);
+        });
+    _streams.push_back(stream);
+    spdlog::info("Registered stream {} at {}", stream->id, stream->directory);
   }
 
   _cfg.lookupValue("api.enabled", _api_enabled);
@@ -55,14 +72,6 @@ FluteFfmpegTx::FluteFfmpegTx(const libconfig::Config &cfg, boost::asio::io_servi
     _api_poll_timer.async_wait( boost::bind(&FluteFfmpegTx::api_poll_tick, this));
   }
 
-  _transmitter = std::make_unique<LibFlute::Transmitter>(_transmitter_multicast_ip, _transmitter_multicast_port, 0,
-                                                         _mtu, _rate_limit, _io_service);
-  _transmitter->register_completion_callback(
-        [&](uint32_t toi) {
-          spdlog::debug("File with TOI {} has been sent. Freeing buffer.", toi);
-          free(_file_buffers[toi]);
-          _file_buffers.erase(toi);
-        });
 }
 auto FluteFfmpegTx::api_poll_tick() -> void
 {
@@ -71,12 +80,12 @@ auto FluteFfmpegTx::api_poll_tick() -> void
   };
   if (_api_enabled) {
     for (auto& stream : _streams) {
-      if (auto res = _api_client->Get("/capi/stream/"+stream.id+"/enabled", headers)) {
+      if (auto res = _api_client->Get("/capi/stream/"+stream->id+"/enabled", headers)) {
         if (res->status == 200) {
           bool enabled = (res->body == "TRUE");
-          if (stream.enabled != enabled) {
-            spdlog::info("{}abling stream {}", enabled ? "En" : "Dis", stream.id);
-            stream.enabled = enabled;
+          if (stream->enabled != enabled) {
+            spdlog::info("{}abling stream {}", enabled ? "En" : "Dis", stream->id);
+            stream->enabled = enabled;
           }
         }
       } else {
@@ -89,48 +98,42 @@ auto FluteFfmpegTx::api_poll_tick() -> void
   _api_poll_timer.async_wait( boost::bind(&FluteFfmpegTx::api_poll_tick, this));
 }
 
-void FluteFfmpegTx::send_by_flute(const std::string &path, std::string content_type = "video/mp4") {
-  std::ifstream file(path, std::ios::binary | std::ios::ate);
+
+void FluteFfmpegTx::Stream::on_file_renamed(const Poco::DirectoryWatcher::DirectoryEvent &changeEvent) {
+  if (!enabled) return;
+
+  Poco::Path path(changeEvent.item.path());
+  spdlog::info("Stream {}  -- File renamed: Name: {} ",id, changeEvent.item.path());
+  std::ifstream file(changeEvent.item.path(), std::ios::binary | std::ios::ate);
   std::streamsize size = file.tellg();
-  file.seekg(0, std::ios::beg);
+  if (size > 0) {
+    file.seekg(0, std::ios::beg);
 
-  char *buffer = (char *) malloc(size);
-  file.read(buffer, size);
+    char *buffer = (char *) malloc(size);
+    file.read(buffer, size);
 
-  if (path.find(".mpd") != std::string::npos) {
-    content_type = DASH_CONTENT_TYPE;
-  } else if (path.find(".m3u8") != std::string::npos) {
-    content_type = HLS_CONTENT_TYPE;
-  }
+    std::remove(changeEvent.item.path().c_str());
 
-  std::string stripped_path = path;
-  size_t pos = stripped_path.find(_watchfolder_path);
-  if (pos != std::string::npos)
-  {
-    stripped_path.erase(pos, _watchfolder_path.length());
-  }
-
-  uint32_t toi = _transmitter->send(stripped_path,
-                                    content_type,
-                                    _transmitter->seconds_since_epoch() + 60, // 1 minute from now
-                                    buffer,
-                                    (size_t) size
-  );
-  _file_buffers[toi] = (void*)buffer;
-
-  spdlog::info("Queued {} ({}b) for FLUTE transmission with MIME type {}, TOI is {}", path, size, content_type, toi);
-}
-
-void FluteFfmpegTx::on_file_renamed(const Poco::DirectoryWatcher::DirectoryEvent &changeEvent) {
-  std::string path = changeEvent.item.path();
-  spdlog::info("File renamed: Name: {} ", path);
-
-  for (const auto& stream : _streams) {
-    if (path.rfind(stream.directory, 0) == 0) { // file is part of this stream
-      if (stream.enabled) {
-        send_by_flute(path);
-      }
+    std::string content_type;
+    if (path.getFileName().find(".mpd") != std::string::npos) {
+      content_type = DASH_CONTENT_TYPE;
+    } else if (path.getFileName().find(".m3u8") != std::string::npos) {
+      content_type = HLS_CONTENT_TYPE;
+    } else if (path.getFileName().find(".ts") != std::string::npos) {
+      content_type = MPEGTS_CONTENT_TYPE;
     }
-  }
-}
 
+    spdlog::info("Service with TSI {} transmitting file at {}", tsi, path.getFileName());
+    uint32_t toi = transmitter->send(path.getFileName(),
+        content_type,
+        transmitter->seconds_since_epoch() + 60, // 1 minute from now
+        buffer,
+        (size_t) size
+        );
+    file_buffers[toi] = (void*)buffer;
+    spdlog::info("Queued {} ({}b) for FLUTE transmission with MIME type {}, TOI {}", path.getFileName(), size, content_type, toi);
+  }
+  file.close();
+
+
+}

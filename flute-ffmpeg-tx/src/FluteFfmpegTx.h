@@ -40,29 +40,25 @@ private:
   struct Stream {
     std::string id = {};
     std::string directory = {};
-    bool enabled = true;
+    unsigned tsi = {};
+    uint32_t rate_limit = 50000;
     std::unique_ptr<Poco::DirectoryWatcher> watcher = {};
+    std::unique_ptr<LibFlute::Transmitter> transmitter = {};
+    void on_file_renamed(const Poco::DirectoryWatcher::DirectoryEvent &changeEvent);
+    std::map<uint32_t, void*> file_buffers = {};
+    bool enabled = true;
   };
-  std::vector<Stream> _streams = {};
-  std::map<uint32_t, void*> _file_buffers = {};
+  std::vector<std::shared_ptr<Stream>> _streams = {};
 
   boost::asio::io_service& _io_service;
-  std::unique_ptr<LibFlute::Transmitter> _transmitter;
   const libconfig::Config &_cfg;
-  std::string _transmitter_multicast_ip = "238.1.1.95";
-  unsigned _transmitter_multicast_port = 40085;
   unsigned _mtu = 1500;
   uint32_t _rate_limit = 50000;
   std::string _watchfolder_path = "/var/www/watchfolder_out";
   std::string _service_announcement = "../files/bootstrap.multipart.hls";
   std::chrono::time_point<std::chrono::high_resolution_clock> _last_sa_send_time = {};
   unsigned _sa_resend_interval = 5;
-  const std::string DASH_CONTENT_TYPE = "application/dash+xml";
-  const std::string HLS_CONTENT_TYPE = "application/x-mpegURL";
 
-  void on_file_renamed(const Poco::DirectoryWatcher::DirectoryEvent &changeEvent);
-
-  void send_by_flute(const std::string &path, std::string content_type);
   void send_service_announcement();
 
   bool _api_enabled = false;
