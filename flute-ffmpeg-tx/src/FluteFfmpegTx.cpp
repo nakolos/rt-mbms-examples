@@ -112,7 +112,7 @@ void FluteFfmpegTx::Stream::on_file_renamed(const Poco::DirectoryWatcher::Direct
     char *buffer = (char *) malloc(size);
     file.read(buffer, size);
 
-    std::remove(changeEvent.item.path().c_str());
+    //std::remove(changeEvent.item.path().c_str());
 
     std::string content_type;
     if (path.getFileName().find(".mpd") != std::string::npos) {
